@@ -21,6 +21,7 @@ Each dimension is measured before it is “fixed”:
 notebooks/Week09_Lab04_DataCleansing_and_Profiling.py
 data_quality/validation.py                # pure-Python rules (no Spark)
 tests/test_data_validation_rules.py
+pyproject.toml                            # puts the repo root on pytest's path
 requirements-dev.txt
 ```
 
@@ -32,7 +33,7 @@ Python 3.10 or newer. No Spark installation and no Databricks credentials are re
 
 ```bash
 python -m pip install -r requirements-dev.txt
-pytest -q
+python -m pytest -q
 ```
 
 ## How CI deploys
