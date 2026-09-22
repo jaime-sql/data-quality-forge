@@ -1,0 +1,17 @@
+{
+  "name": "data-quality-forge-pipeline",
+  "tasks": [
+    {
+      "task_key": "bronze_to_silver",
+      "notebook_task": {
+        "notebook_path": "/Shared/Week09_Lab04_DataCleansing/Pipeline_Bronze_Quarantine_Silver",
+        "source": "WORKSPACE"
+      }
+    }
+  ],
+  "queue": {
+    "enabled": true
+  },
+  "max_concurrent_runs": 1,
+  "timeout_seconds": 1800
+}

@@ -1,4 +1,5 @@
-# Test the cluster-free quality rules, then import notebooks/ into Databricks.
+# Test the cluster-free quality rules, import notebooks/ into Databricks,
+# then upsert and run the data-quality-forge-pipeline Job (bronze → quarantine → silver).
 # Secrets DATABRICKS_HOST and DATABRICKS_TOKEN are repository secrets.
 # Do not echo them and do not commit token values.
 
@@ -151,3 +152,8 @@ jobs:
 
           print(f"Imported {len(notebooks)} notebook(s) into {workspace_dir}")
           PY
+
+      - name: Upsert and run data-quality pipeline Job
+        env:
+          RUN_JOB: "true"
+        run: python3 scripts/upsert_databricks_job.py
