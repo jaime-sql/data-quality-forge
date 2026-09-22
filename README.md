@@ -33,7 +33,7 @@ Python 3.10 or newer. No Spark installation and no Databricks credentials are re
 
 ```bash
 python -m pip install -r requirements-dev.txt
-python -m pytest -q
+pytest -q
 ```
 
 ## How CI deploys
@@ -42,7 +42,7 @@ Workflow: [`.github/workflows/deploy_databricks.yml`](.github/workflows/deploy_d
 
 It runs on every **push to `main`** and when someone starts it with **workflow_dispatch**.
 
-1. **Unit tests** — installs `requirements-dev.txt` and runs `pytest -q`.
+1. **Unit tests** — checks out the repo, sets up Python, installs pytest and `requirements-dev.txt`, then runs `pytest -q`.
 2. **Import** — only if tests pass (`needs: test`). The job:
    - fails immediately when `DATABRICKS_HOST` or `DATABRICKS_TOKEN` is missing;
    - creates `/Shared/Week09_Lab04_DataCleansing` with the Workspace `mkdirs` API if it is not already there;

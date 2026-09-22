@@ -238,7 +238,8 @@ def test_workflow_syncs_notebooks_with_workspace_secrets():
     assert "workflow_dispatch" in text
     assert "branches:" in text
     assert "main" in text
-    assert "pytest" in text
+    assert "pytest -q" in text
+    assert "requirements-dev.txt" in text
     assert "needs: test" in text
     assert "secrets.DATABRICKS_HOST" in text
     assert "secrets.DATABRICKS_TOKEN" in text
