@@ -1,0 +1,148 @@
+# Test the cluster-free quality rules, then import notebooks/ into Databricks.
+# Secrets DATABRICKS_HOST and DATABRICKS_TOKEN are repository secrets.
+# Do not echo them and do not commit token values.
+
+name: Test and deploy notebooks
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dev dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements-dev.txt
+
+      - name: Run unit tests
+        run: pytest -q
+
+  deploy:
+    name: Import notebooks to Databricks
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fail if Databricks secrets are missing
+        run: |
+          set -euo pipefail
+          missing=0
+          if [ -z "${DATABRICKS_HOST}" ]; then
+            echo "::error::Repository secret DATABRICKS_HOST is not set."
+            missing=1
+          fi
+          if [ -z "${DATABRICKS_TOKEN}" ]; then
+            echo "::error::Repository secret DATABRICKS_TOKEN is not set."
+            missing=1
+          fi
+          if [ "${missing}" -ne 0 ]; then
+            echo "Add both secrets in Settings → Secrets and variables → Actions."
+            echo "DATABRICKS_HOST should be the workspace URL, for example https://adb-xxxx.cloud.databricks.com"
+            echo "Do not commit token values to the repository."
+            exit 1
+          fi
+
+      - name: Create workspace folder and import notebooks
+        run: |
+          python3 - <<'PY'
+          import base64
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+
+          host = os.environ.get("DATABRICKS_HOST", "").strip().rstrip("/")
+          token = os.environ.get("DATABRICKS_TOKEN", "").strip()
+          workspace_dir = "/Shared/Week09_Lab04_DataCleansing"
+
+          if not host or not token:
+              print(
+                  "::error::DATABRICKS_HOST and DATABRICKS_TOKEN must both be set.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          if not host.startswith(("http://", "https://")):
+              host = "https://" + host
+
+          def api(path: str, payload: dict) -> None:
+              request = urllib.request.Request(
+                  host + path,
+                  data=json.dumps(payload).encode("utf-8"),
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Content-Type": "application/json",
+                  },
+                  method="POST",
+              )
+              try:
+                  with urllib.request.urlopen(request, timeout=120) as response:
+                      status = response.status
+                      body = response.read().decode("utf-8", errors="replace")
+              except urllib.error.HTTPError as exc:
+                  detail = exc.read().decode("utf-8", errors="replace")
+                  print(
+                      f"::error::{path} failed with HTTP {exc.code}: {detail}",
+                      file=sys.stderr,
+                  )
+                  sys.exit(1)
+              except urllib.error.URLError as exc:
+                  print(
+                      f"::error::Could not reach Databricks at the configured host: {exc.reason}",
+                      file=sys.stderr,
+                  )
+                  sys.exit(1)
+              if status < 200 or status >= 300:
+                  print(
+                      f"::error::{path} failed with HTTP {status}: {body}",
+                      file=sys.stderr,
+                  )
+                  sys.exit(1)
+
+          print(f"Creating workspace folder {workspace_dir}")
+          api("/api/2.0/workspace/mkdirs", {"path": workspace_dir})
+
+          notebooks = sorted(Path("notebooks").glob("*.py"))
+          if not notebooks:
+              print("::error::No Python notebooks found under notebooks/", file=sys.stderr)
+              sys.exit(1)
+
+          for notebook in notebooks:
+              target = f"{workspace_dir}/{notebook.stem}"
+              content = base64.b64encode(notebook.read_bytes()).decode("ascii")
+              print(f"Importing {notebook.as_posix()} -> {target}")
+              api(
+                  "/api/2.0/workspace/import",
+                  {
+                      "path": target,
+                      "format": "SOURCE",
+                      "language": "PYTHON",
+                      "content": content,
+                      "overwrite": True,
+                  },
+              )
+
+          print(f"Imported {len(notebooks)} notebook(s) into {workspace_dir}")
+          PY
