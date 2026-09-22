@@ -128,16 +128,19 @@ amount_normalized = (
     ).otherwise(F.col("amount"))
 )
 
+# Safe cast via SQL try_cast (works on runtimes where F.try_cast is missing)
 typed = (
     bronze_orders.withColumn("order_id_clean", F.trim(F.col("order_id")))
+    .withColumn("amount_norm", amount_normalized)
     .withColumn(
         "amount_num",
         F.when(
-            F.upper(F.trim(amount_normalized)).isin("N/A", "NULL", "NONE", ""),
+            F.upper(F.trim(F.col("amount_norm"))).isin("N/A", "NULL", "NONE", ""),
             F.lit(None).cast(DoubleType()),
-        ).otherwise(F.try_cast(amount_normalized, DoubleType())),
+        ).otherwise(F.expr("try_cast(amount_norm AS DOUBLE)")),
     )
-    .withColumn("qty_num", F.try_cast(F.trim(F.col("qty")), IntegerType()))
+    .withColumn("qty_trim", F.trim(F.col("qty")))
+    .withColumn("qty_num", F.expr("try_cast(qty_trim AS INT)"))
     .withColumn("order_date_ts", F.to_date(F.trim(F.col("order_date")), "yyyy-MM-dd"))
     .withColumn("country_clean", F.upper(F.trim(F.col("country"))))
     .withColumn("currency_clean", F.upper(F.trim(F.col("currency"))))
