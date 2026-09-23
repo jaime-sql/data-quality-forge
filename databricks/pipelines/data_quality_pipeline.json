@@ -1,0 +1,17 @@
+{
+  "name": "data-quality-forge-pipeline",
+  "libraries": [
+    {
+      "notebook": {
+        "path": "/Shared/Week09_Lab04_DataCleansing/Pipeline_Bronze_Quarantine_Silver"
+      }
+    }
+  ],
+  "catalog": "workspace",
+  "schema": "data_quality_forge",
+  "serverless": true,
+  "channel": "CURRENT",
+  "continuous": false,
+  "development": true,
+  "photon": true
+}

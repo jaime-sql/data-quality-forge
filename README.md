@@ -20,8 +20,8 @@ Each dimension is measured before it is “fixed”:
 .github/workflows/deploy_databricks.yml   # pytest → import → upsert/run Job
 AGENTS.md                                 # commit authorship + agent rules
 notebooks/Week09_Lab04_DataCleansing_and_Profiling.py  # student lab (TODOs)
-notebooks/Pipeline_Bronze_Quarantine_Silver.py         # runnable CI / Job notebook
-databricks/jobs/data_quality_pipeline.json
+notebooks/Pipeline_Bronze_Quarantine_Silver.py         # DLT pipeline notebook (@dlt.table)
+databricks/pipelines/data_quality_pipeline.json
 databricks/jobs/README.md
 scripts/upsert_databricks_job.py
 data_quality/validation.py                # pure-Python rules (no Spark)
@@ -52,7 +52,7 @@ It runs on every **push to `main`** and when someone starts it with **workflow_d
    - fails immediately when `DATABRICKS_HOST` or `DATABRICKS_TOKEN` is missing;
    - creates `/Shared/Week09_Lab04_DataCleansing` with the Workspace `mkdirs` API if it is not already there;
    - imports each `notebooks/*.py` file with the Workspace `import` API as **SOURCE / PYTHON**, with **overwrite**.
-3. **Upsert + run Job** — `python3 scripts/upsert_databricks_job.py` with `RUN_JOB=true` creates or resets the Databricks Job `data-quality-forge-pipeline` and starts a run of the runnable pipeline notebook (not the student lab).
+3. **Upsert + run Pipeline** — `python3 scripts/upsert_databricks_job.py` with `RUN_JOB=true` creates or updates the Lakeflow/DLT Pipeline `data-quality-forge-pipeline` (tables `bronze_orders`, `quarantine_orders`, `silver_orders`) and starts an update. Attach this Pipeline to `Pipeline_Bronze_Quarantine_Silver`, not the student lab.
 
 Notebooks land at:
 
@@ -73,20 +73,23 @@ Never commit tokens, `.env` files, or `.databrickscfg`. Do not paste a personal 
 
 Open the imported notebook in Databricks and run it from the top. Setup and the synthetic batch are ready. Each later section raises `NotImplementedError` until you replace the `# TODO(estudiante):` with your own Spark code. When a row could reasonably be normalized or quarantined (European decimals, `USA` vs `US`, dates that use `/`), write the decision in a short comment next to the code.
 
-## Data pipeline Job (bronze → quarantine → silver)
+## Data pipeline (bronze → quarantine → silver)
 
-CI also maintains a Databricks Job named **`data-quality-forge-pipeline`**.
+CI maintains a Lakeflow/DLT Pipeline named **`data-quality-forge-pipeline`**.
 
 | Piece | Detail |
 | --- | --- |
-| Task | `bronze_to_silver` |
+| Tables | `bronze_orders`, `quarantine_orders`, `silver_orders` |
+| View | `orders_typed` (casts + rule reasons) |
 | Notebook | `/Shared/Week09_Lab04_DataCleansing/Pipeline_Bronze_Quarantine_Silver` |
-| Definition | [`databricks/jobs/data_quality_pipeline.json`](databricks/jobs/data_quality_pipeline.json) |
+| Definition | [`databricks/pipelines/data_quality_pipeline.json`](databricks/pipelines/data_quality_pipeline.json) |
 | Upsert script | [`scripts/upsert_databricks_job.py`](scripts/upsert_databricks_job.py) |
 
-Flow: synthetic **bronze** orders → quick profile → safe casts → invalid rows to **quarantine** (reason codes) → windowed dedupe on `order_id` → **silver**. After a successful notebook import, Actions upserts the Job by name and triggers `run-now`.
+Flow: synthetic **bronze** → safe casts → invalid rows to **quarantine** (reason codes) → windowed dedupe on `order_id` → **silver**. After notebook import, Actions upserts the Pipeline and starts an update.
 
-The student Lab 4 notebook stays TODO-driven; the Job never points at it. See [`databricks/jobs/README.md`](databricks/jobs/README.md) for Free Edition / serverless notes.
+**Important:** run this notebook from **Pipelines**, not as a classic Job “Run now” on a notebook without `@dlt.table`. Otherwise Databricks raises `NO_TABLES_IN_PIPELINE`.
+
+The student Lab 4 notebook stays TODO-driven; the Pipeline never points at it. See [`databricks/pipelines/README.md`](databricks/pipelines/README.md).
 
 ## Agent / commit authorship
 

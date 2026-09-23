@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Upsert Databricks Job from databricks/jobs/data_quality_pipeline.json and optionally run it.
+"""Upsert a Databricks Lakeflow/DLT Pipeline and optionally start an update.
 
 Stdlib only (urllib). Env:
-  DATABRICKS_HOST   workspace URL (https://...)
-  DATABRICKS_TOKEN  PAT / OAuth token (never printed)
-  RUN_JOB           true|false — default true (CI after deploy)
+  DATABRICKS_HOST      workspace URL (https://...)
+  DATABRICKS_TOKEN     PAT (never printed)
+  RUN_JOB              true|false — start a pipeline update after upsert (default true)
+  DATABRICKS_CATALOG   Unity Catalog name (default: workspace)
+  DATABRICKS_SCHEMA    Schema / target (default: data_quality_forge)
 """
 
 from __future__ import annotations
@@ -18,11 +20,12 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-JOB_NAME = "data-quality-forge-pipeline"
-JOB_DEF_REL = Path("databricks/jobs/data_quality_pipeline.json")
+PIPELINE_NAME = "data-quality-forge-pipeline"
+PIPELINE_DEF_REL = Path("databricks/pipelines/data_quality_pipeline.json")
+# Legacy path still accepted if someone has not pulled the new folder yet
+LEGACY_JOB_DEF_REL = Path("databricks/jobs/data_quality_pipeline.json")
 LIST_PAGE_SIZE = 25
-# Optional short poll after run-now (seconds). Exit 0 after start even if still running.
-WAIT_BUDGET_SEC = 180
+WAIT_BUDGET_SEC = 300
 POLL_INTERVAL_SEC = 10
 
 
@@ -77,12 +80,11 @@ def _api(
         headers["Content-Type"] = "application/json"
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:
+        with urllib.request.urlopen(request, timeout=180) as response:
             body = response.read().decode("utf-8", errors="replace")
             status = response.status
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        # Never echo Authorization / token; detail is API JSON only.
         _die(f"{method} {path} failed with HTTP {exc.code}: {detail}")
     except urllib.error.URLError as exc:
         _die(f"Could not reach Databricks host: {exc.reason}")
@@ -97,98 +99,169 @@ def _api(
 
 
 def _load_settings(repo_root: Path) -> dict:
-    path = repo_root / JOB_DEF_REL
+    path = repo_root / PIPELINE_DEF_REL
     if not path.is_file():
-        _die(f"Job definition not found: {path}")
+        _die(f"Pipeline definition not found: {path}")
     try:
         settings = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         _die(f"Invalid JSON in {path}: {exc}")
-    if settings.get("name") != JOB_NAME:
-        _die(f"Expected job name {JOB_NAME!r} in {path}, got {settings.get('name')!r}")
+    if settings.get("name") != PIPELINE_NAME:
+        _die(f"Expected pipeline name {PIPELINE_NAME!r} in {path}, got {settings.get('name')!r}")
+
+    catalog = os.environ.get("DATABRICKS_CATALOG", "").strip()
+    schema = os.environ.get("DATABRICKS_SCHEMA", "").strip()
+    if catalog:
+        settings["catalog"] = catalog
+    if schema:
+        settings["schema"] = schema
     return settings
 
 
-def _find_job_id(host: str, token: str, name: str) -> int | None:
+def _find_pipeline_id(host: str, token: str, name: str) -> str | None:
     page_token = None
     while True:
-        query: dict = {"limit": LIST_PAGE_SIZE}
+        query: dict = {"max_results": LIST_PAGE_SIZE}
         if page_token:
             query["page_token"] = page_token
-        result = _api(host, token, "GET", "/api/2.1/jobs/list", query=query)
-        for job in result.get("jobs") or []:
-            settings = job.get("settings") or {}
-            if settings.get("name") == name:
-                job_id = job.get("job_id")
-                if job_id is None:
-                    _die(f"Matched job named {name!r} but job_id missing: {job}")
-                return int(job_id)
+        result = _api(host, token, "GET", "/api/2.0/pipelines", query=query)
+        for pipe in result.get("statuses") or result.get("pipelines") or []:
+            # list returns {pipeline_id, name, state, ...} under statuses on some APIs
+            if pipe.get("name") == name:
+                pid = pipe.get("pipeline_id")
+                if not pid:
+                    _die(f"Matched pipeline named {name!r} but pipeline_id missing: {pipe}")
+                return str(pid)
         page_token = result.get("next_page_token")
         if not page_token:
             return None
 
 
-def _upsert(host: str, token: str, settings: dict) -> int:
-    existing = _find_job_id(host, token, JOB_NAME)
+def _api_allow_fail(
+    host: str,
+    token: str,
+    method: str,
+    path: str,
+    payload: dict | None = None,
+) -> tuple[int, dict | str]:
+    """Like _api but returns (status, body) instead of dying on HTTP errors."""
+    url = host + path
+    data = None
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+    }
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=180) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            status = response.status
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        try:
+            return exc.code, json.loads(detail)
+        except json.JSONDecodeError:
+            return exc.code, detail
+    except urllib.error.URLError as exc:
+        _die(f"Could not reach Databricks host: {exc.reason}")
+    if not body.strip():
+        return status, {}
+    try:
+        return status, json.loads(body)
+    except json.JSONDecodeError:
+        return status, body
+
+
+def _storage_fallback(settings: dict) -> dict:
+    """Hive-style pipeline when Unity Catalog catalog/schema is unavailable."""
+    fb = {
+        "name": settings["name"],
+        "storage": "dbfs:/pipelines/data-quality-forge",
+        "target": settings.get("schema") or "data_quality_forge",
+        "libraries": settings["libraries"],
+        "channel": settings.get("channel", "CURRENT"),
+        "continuous": False,
+        "development": True,
+        "photon": True,
+    }
+    return fb
+
+
+def _upsert(host: str, token: str, settings: dict) -> str:
+    existing = _find_pipeline_id(host, token, PIPELINE_NAME)
+    attempts = [settings, _storage_fallback(settings)]
     if existing is not None:
-        print(f"Found existing job {JOB_NAME!r} (job_id={existing}); resetting settings.")
-        _api(
-            host,
-            token,
-            "POST",
-            "/api/2.1/jobs/reset",
-            payload={"job_id": existing, "new_settings": settings},
-        )
-        return existing
-    print(f"No job named {JOB_NAME!r}; creating.")
-    created = _api(host, token, "POST", "/api/2.1/jobs/create", payload=settings)
-    job_id = created.get("job_id")
-    if job_id is None:
-        _die(f"jobs/create succeeded but no job_id in response: {created}")
-    print(f"Created job_id={job_id}")
-    return int(job_id)
+        print(f"Found existing pipeline {PIPELINE_NAME!r} (pipeline_id={existing}); updating.")
+        last_err = None
+        for payload_base in attempts:
+            payload = dict(payload_base)
+            payload["id"] = existing
+            status, body = _api_allow_fail(
+                host, token, "PUT", f"/api/2.0/pipelines/{existing}", payload=payload
+            )
+            if 200 <= status < 300:
+                print(f"Updated pipeline with keys: {sorted(k for k in payload if k != 'id')}")
+                return existing
+            last_err = body
+            print(f"Update attempt failed HTTP {status}; trying fallback settings…")
+        _die(f"Could not update pipeline {existing}: {last_err}")
+
+    print(f"No pipeline named {PIPELINE_NAME!r}; creating.")
+    last_err = None
+    for payload in attempts:
+        status, body = _api_allow_fail(host, token, "POST", "/api/2.0/pipelines", payload=payload)
+        if 200 <= status < 300 and isinstance(body, dict):
+            pipeline_id = body.get("pipeline_id")
+            if pipeline_id:
+                print(f"Created pipeline_id={pipeline_id} with keys: {sorted(payload)}")
+                return str(pipeline_id)
+        last_err = body
+        print(f"Create attempt failed HTTP {status}; trying fallback settings…")
+    _die(f"Could not create pipeline: {last_err}")
 
 
-def _run_now(host: str, token: str, job_id: int) -> int:
-    result = _api(host, token, "POST", "/api/2.1/jobs/run-now", payload={"job_id": job_id})
-    run_id = result.get("run_id")
-    if run_id is None:
-        _die(f"jobs/run-now succeeded but no run_id: {result}")
-    run_id = int(run_id)
-    runs_url = f"{host}/#job/{job_id}/run/{run_id}"
-    print(f"Started run_id={run_id}")
-    print(f"Run page (workspace UI): {runs_url}")
-    return run_id
+def _start_update(host: str, token: str, pipeline_id: str) -> str:
+    result = _api(
+        host,
+        token,
+        "POST",
+        f"/api/2.0/pipelines/{pipeline_id}/updates",
+        payload={"full_refresh": True},
+    )
+    update_id = result.get("update_id")
+    if not update_id:
+        _die(f"pipelines/.../updates succeeded but no update_id: {result}")
+    update_id = str(update_id)
+    ui = f"{host}/#joblist/pipelines/{pipeline_id}/updates/{update_id}"
+    print(f"Started update_id={update_id}")
+    print(f"Pipeline update UI: {ui}")
+    return update_id
 
 
-def _maybe_wait(host: str, token: str, run_id: int) -> None:
-    """Poll briefly for a terminal state; do not fail the deploy if still running."""
+def _maybe_wait(host: str, token: str, pipeline_id: str, update_id: str) -> None:
     deadline = time.monotonic() + WAIT_BUDGET_SEC
-    terminal = {"TERMINATED", "SKIPPED", "INTERNAL_ERROR"}
+    terminal = {"COMPLETED", "FAILED", "CANCELED"}
     while time.monotonic() < deadline:
         info = _api(
             host,
             token,
             "GET",
-            "/api/2.1/jobs/runs/get",
-            query={"run_id": run_id},
+            f"/api/2.0/pipelines/{pipeline_id}/updates/{update_id}",
         )
-        state = (info.get("state") or {})
-        life = state.get("life_cycle_state") or "UNKNOWN"
-        result_state = state.get("result_state")
-        print(f"Run {run_id} life_cycle_state={life} result_state={result_state}")
-        if life in terminal:
-            if result_state and result_state != "SUCCESS":
-                _die(
-                    f"Job run {run_id} finished with result_state={result_state}: "
-                    f"{state.get('state_message') or ''}"
-                )
-            print(f"Run {run_id} completed successfully.")
+        state = (info.get("update") or info).get("state") or "UNKNOWN"
+        print(f"Update {update_id} state={state}")
+        if state in terminal:
+            if state != "COMPLETED":
+                _die(f"Pipeline update {update_id} finished with state={state}: {info}")
+            print(f"Update {update_id} completed successfully.")
             return
         time.sleep(POLL_INTERVAL_SEC)
     print(
-        f"Run {run_id} still in progress after ~{WAIT_BUDGET_SEC}s; "
-        "exiting 0 (check the run page in Databricks)."
+        f"Update {update_id} still in progress after ~{WAIT_BUDGET_SEC}s; "
+        "exiting 0 (check the pipeline UI in Databricks)."
     )
 
 
@@ -196,17 +269,17 @@ def main() -> None:
     repo_root = Path(__file__).resolve().parent.parent
     host, token = _host_and_token()
     settings = _load_settings(repo_root)
-    run_job = _truthy(os.environ.get("RUN_JOB"), default=True)
+    run_update = _truthy(os.environ.get("RUN_JOB"), default=True)
 
-    job_id = _upsert(host, token, settings)
-    print(f"Upserted job_id={job_id} name={JOB_NAME}")
+    pipeline_id = _upsert(host, token, settings)
+    print(f"Upserted pipeline_id={pipeline_id} name={PIPELINE_NAME}")
 
-    if not run_job:
-        print("RUN_JOB is false; skipping run-now.")
+    if not run_update:
+        print("RUN_JOB is false; skipping pipeline update.")
         return
 
-    run_id = _run_now(host, token, job_id)
-    _maybe_wait(host, token, run_id)
+    update_id = _start_update(host, token, pipeline_id)
+    _maybe_wait(host, token, pipeline_id, update_id)
 
 
 if __name__ == "__main__":
