@@ -14,7 +14,7 @@ Free Edition workspace uses different names.
 
 `bronze_orders` reads the class-demo CSV from the Unity Catalog Volume
 `/Volumes/workspace/data_quality_forge/landing/orders/orders_messy.csv`.
-The same 12 messy lab rows are in `data/landing/orders/orders_messy.csv`.
+`data/landing/orders/orders_messy.csv` has 112 data rows: the original 12 messy lab rows plus 100 more.
 Bronze is no longer purely synthetic: the Volume file is the source when it is present.
 If that file is missing, the notebook falls back to the in-notebook `RAW_ROWS` batch.
 Quarantine and silver logic are unchanged.
