@@ -5,7 +5,7 @@
 # MAGIC This notebook is meant to run as a **Databricks Pipeline** (ETL / DLT), not as a
 # MAGIC one-off "Run all" Job cell notebook. Each `@dlt.table` becomes a pipeline table.
 # MAGIC
-# MAGIC Same Lab 4 ideas on a synthetic bronze orders batch: profile helpers → safe cast →
+# MAGIC Same Lab 4 ideas; bronze reads a UC Volume CSV (with synthetic fallback): profile helpers → safe cast →
 # MAGIC quarantine with reason codes → window dedupe → silver.
 # MAGIC
 # MAGIC In the UI: **Pipelines → Create pipeline →** attach this notebook path, then **Start**.
@@ -124,17 +124,34 @@ def _typed_frame(bronze):
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 1. Bronze — synthetic messy batch (pipeline table)
+# MAGIC ## 1. Bronze — external CSV on a UC Volume (pipeline table)
+# MAGIC
+# MAGIC Source file (demo "outside" data):
+# MAGIC `/Volumes/workspace/data_quality_forge/landing/orders/orders_messy.csv`
+# MAGIC
+# MAGIC Same 12 messy lab rows. Quarantine / silver stay unchanged.
+# MAGIC If the file is missing, we fall back to the in-notebook `RAW_ROWS` (still works offline).
 
 # COMMAND ----------
+
+LANDING_CSV = "/Volumes/workspace/data_quality_forge/landing/orders/orders_messy.csv"
 
 
 @dlt.table(
     name="bronze_orders",
-    comment="Synthetic messy orders batch (bronze). Teaching source for Lab 4 quality rules.",
+    comment="Messy orders from UC Volume CSV (bronze). Lab 4 teaching source.",
 )
 def bronze_orders():
-    return spark.createDataFrame(RAW_ROWS, schema=RAW_SCHEMA)
+    try:
+        return (
+            spark.read.option("header", True)
+            .option("mode", "PERMISSIVE")
+            .schema(RAW_SCHEMA)
+            .csv(LANDING_CSV)
+        )
+    except Exception:
+        # Fallback for demos when the Volume file is not present
+        return spark.createDataFrame(RAW_ROWS, schema=RAW_SCHEMA)
 
 
 # COMMAND ----------
